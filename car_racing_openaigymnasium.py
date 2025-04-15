@@ -1,10 +1,7 @@
 __credits__ = ["Andrea PIERRÉ"]  # 作者信息
-
 import math  # 数学函数模块
 from typing import Optional, Union  # 用于类型注解
-
 import numpy as np  # 数组与数值计算库
-
 import gymnasium as gym  # 导入Gymnasium环境包
 from gymnasium import spaces  # 导入动作和观察空间的定义
 from gymnasium.envs.box2d.car_dynamics import Car  # 导入汽车动力学模型
@@ -40,17 +37,16 @@ WINDOW_W = 1000 # 渲染窗口宽度
 WINDOW_H = 800
 
 SCALE = 6.0  # Track scale。赛道缩放比例
-TRACK_RAD = 900 / SCALE  # 圆形赛道基础半径。好像是先生成圆，再使其变形产生弯角。
-PLAYFIELD = 2000 / SCALE  # Game over boundary。车辆越界检测范围
+TRACK_RAD = 954 / SCALE  # 圆形赛道基础半径。好像是先生成圆，再使其变形产生弯角。
+PLAYFIELD = 2000 / SCALE  # Game over boundary。总图范围。
 FPS = 50  # Frames per second
-ZOOM = 2.7  # Camera zoom。相机放大比例
+ZOOM = 0.27  # Camera zoom。相机放大比例
 ZOOM_FOLLOW = True  # Set to False for fixed view (no zoom)
 
-
-TRACK_DETAIL_STEP = 21 / SCALE  # 赛道分段步长
-TRACK_TURN_RATE = 0.31  # 赛道转弯率，控制赛道弯曲程度
+TRACK_DETAIL_STEP = 21 / SCALE  # 赛道分段步长。值越大，如40，长弯多
+TRACK_TURN_RATE = 0.3  # 赛道转弯率，控制赛道弯曲程度。越小倾向长弯，高速弯；越大倾向锐利弯，短弯。
 TRACK_WIDTH = 40 / SCALE # 赛道宽度
-BORDER = 8 / SCALE # 赛道边界宽度
+BORDER = 8 / SCALE # 赛道边界（路肩）宽度
 BORDER_MIN_COUNT = 4 # 最少的边界块数量，用于判断赛道边界的生成
 GRASS_DIM = PLAYFIELD / 20.0 # 草地块尺寸
 MAX_SHAPE_DIM = (
@@ -262,11 +258,17 @@ class CarRacing(gym.Env, EzPickle):
 
         # This will throw a warning in tests/envs/test_envs in utils/env_checker.py as the space is not symmetric
         #   or normalised however this is not possible here so ignore
-        if self.continuous:
-            self.action_space = spaces.Box( # 连续动作: [转向,油门,刹车]
-                np.array([-1, 0, 0]).astype(np.float32), # 动作下界：转向最左，油门和刹车为0
-                np.array([+1, +1, +1]).astype(np.float32), # 动作上界：转向最右，油门和刹车最大值为1
-            )  
+        
+        # if self.continuous:
+        #     self.action_space = spaces.Box( # 连续动作: [转向,油门,刹车]
+        #         np.array([-1, 0, 0]).astype(np.float32), # 动作下界：转向最左，油门和刹车为0
+        #         np.array([+1, +1, +1]).astype(np.float32), # 动作上界：转向最右，油门和刹车最大值为1
+        #     )  
+        if self.continuous: # 把油门刹车合并成1个值
+            self.action_space = spaces.Box(
+                np.array([-1, -1]).astype(np.float32),  # 转向范围[-1,1]，油门/刹车范围[-1,1]
+                np.array([+1, +1]).astype(np.float32),  # 负值刹车，正值油门
+            )
         else:
             self.action_space = spaces.Discrete(5) # 离散动作: 无操作/左转/右转/油门/刹车
 
@@ -323,7 +325,7 @@ class CarRacing(gym.Env, EzPickle):
 
     def _create_track(self):
         # 设置检查点的数量，用于构造赛道骨架
-        CHECKPOINTS = 12  # 检查点数量
+        CHECKPOINTS = 24  # 检查点数量
 
         # -----------------------
         # 生成检查点，每个检查点由一个角度alpha和一个半径rad确定
@@ -333,7 +335,7 @@ class CarRacing(gym.Env, EzPickle):
             noise = self.np_random.uniform(0, 2 * math.pi * 1 / CHECKPOINTS)  # 随机噪声
             # 均匀分布的角度，叠加噪声
             alpha = 2 * math.pi * c / CHECKPOINTS + noise
-            # 随机选择半径，保证检查点不都在固定圆周上，值介于TRACK_RAD/3和TRACK_RAD之间
+            # 随机选择半径，保证检查点不都在固定圆周上，值介于TRACK_RAD/3和TRACK_RAD之间。TRACK_RAD/0.1会导致弯角之间的直道很长。
             rad = self.np_random.uniform(TRACK_RAD / 3, TRACK_RAD)
 
             # 对于第一个检查点，固定参数（作为起点）
@@ -417,10 +419,10 @@ class CarRacing(gym.Env, EzPickle):
             proj *= SCALE  # 根据比例尺放大投影长度
 
             # 根据投影值调整车辆方向beta（目标：使得车头更靠近目标方向）
-            if proj > 0.3:
-                beta -= min(TRACK_TURN_RATE, abs(0.001 * proj))
-            if proj < -0.3:
-                beta += min(TRACK_TURN_RATE, abs(0.001 * proj))
+            if proj > 0.3: # 目标在右侧
+                beta -= min(TRACK_TURN_RATE, abs(0.001 * proj)) # 向右
+            if proj < -0.3: # 目标在左侧
+                beta += min(TRACK_TURN_RATE, abs(0.001 * proj)) # 向左
             # 沿着垂直方向更新位置，形成赛道曲线
             x += p1x * TRACK_DETAIL_STEP
             y += p1y * TRACK_DETAIL_STEP
@@ -534,31 +536,31 @@ class CarRacing(gym.Env, EzPickle):
             # 存储瓷砖及其颜色，用于渲染
             self.road_poly.append(([road1_l, road1_r, road2_r, road2_l], t.color))
             self.road.append(t)
-            # 如果当前轨迹点被标记为边界，则创建边缘装饰（红或白色边框）
-            if border[i]:
-                side = np.sign(beta2 - beta1)
-                b1_l = (
-                    x1 + side * TRACK_WIDTH * math.cos(beta1),
-                    y1 + side * TRACK_WIDTH * math.sin(beta1),
-                )
-                b1_r = (
-                    x1 + side * (TRACK_WIDTH + BORDER) * math.cos(beta1),
-                    y1 + side * (TRACK_WIDTH + BORDER) * math.sin(beta1),
-                )
-                b2_l = (
-                    x2 + side * TRACK_WIDTH * math.cos(beta2),
-                    y2 + side * TRACK_WIDTH * math.sin(beta2),
-                )
-                b2_r = (
-                    x2 + side * (TRACK_WIDTH + BORDER) * math.cos(beta2),
-                    y2 + side * (TRACK_WIDTH + BORDER) * math.sin(beta2),
-                )
-                self.road_poly.append(
-                    (
-                        [b1_l, b1_r, b2_r, b2_l],
-                        (255, 255, 255) if i % 2 == 0 else (255, 0, 0),
-                    )
-                )
+            # 如果当前轨迹点被标记为边界，则创建边缘装饰（红或白色边框）。不要路肩
+            # if border[i]:
+            #     side = np.sign(beta2 - beta1)
+            #     b1_l = (
+            #         x1 + side * TRACK_WIDTH * math.cos(beta1),
+            #         y1 + side * TRACK_WIDTH * math.sin(beta1),
+            #     )
+            #     b1_r = (
+            #         x1 + side * (TRACK_WIDTH + BORDER) * math.cos(beta1),
+            #         y1 + side * (TRACK_WIDTH + BORDER) * math.sin(beta1),
+            #     )
+            #     b2_l = (
+            #         x2 + side * TRACK_WIDTH * math.cos(beta2),
+            #         y2 + side * TRACK_WIDTH * math.sin(beta2),
+            #     )
+            #     b2_r = (
+            #         x2 + side * (TRACK_WIDTH + BORDER) * math.cos(beta2),
+            #         y2 + side * (TRACK_WIDTH + BORDER) * math.sin(beta2),
+            #     )
+            #     self.road_poly.append(
+            #         (
+            #             [b1_l, b1_r, b2_r, b2_l],
+            #             (255, 255, 255) if i % 2 == 0 else (255, 0, 0),
+            #         )
+            #     )
         # 保存最终生成的轨迹数据供后续使用（如车辆初始位置等）
         self.track = track
         return True  # 返回True表示赛道生成成功
@@ -623,8 +625,16 @@ class CarRacing(gym.Env, EzPickle):
             if self.continuous:  # 连续动作模式
                 action = action.astype(np.float64)
                 self.car.steer(-action[0])  # 转向操作，注意方向取反
-                self.car.gas(action[1])      # 油门操作
-                self.car.brake(action[2])    # 刹车操作
+                # self.car.gas(action[1])      # 油门操作
+                # self.car.brake(action[2])    # 刹车操作
+                
+                # 油门刹车合并成1个值
+                if action[1] > 0:
+                    self.car.gas(action[1])   # 正值：油门
+                    self.car.brake(0)         # 刹车置零
+                else:
+                    self.car.gas(0)           # 油门置零
+                    self.car.brake(-action[1]) # 负值：刹车（取绝对值）
             else:
                 # 检查传入的动作是否合法
                 if not self.action_space.contains(action):
@@ -690,6 +700,7 @@ class CarRacing(gym.Env, EzPickle):
         else:
             # 根据render_mode调用内部的_render方法进行实际渲染（可能为图像数组或直接显示）
             return self._render(self.render_mode)
+        
 
     # 该函数根据指定的渲染模式，将当前环境状态绘制到屏幕或转换为图像数组返回
     def _render(self, mode: str): 
@@ -772,7 +783,7 @@ class CarRacing(gym.Env, EzPickle):
         else:
             # 其他模式则返回是否仍在打开状态
             return self.isopen
-    
+        
     # 该函数负责绘制背景、草地区域和赛道瓷砖。
     def _render_road(self, zoom, translation, angle): 
         bounds = PLAYFIELD
@@ -933,14 +944,15 @@ class CarRacing(gym.Env, EzPickle):
 
 
 if __name__ == "__main__":
-    a = np.array([0.0, 0.0, 0.0])  # 用于存储控制动作
+    # a = np.array([0.0, 0.0, 0.0])  # 用于存储控制动作
+    a = np.array([0.0, 0.0])  # 油门刹车合并成1个值
 
     def register_input():
         # 全局变量quit和restart用于控制退出或重启
         global quit, restart
-        # 处理pygame事件
+        # 遍历处理pygame事件
         for event in pygame.event.get():
-            if event.type == pygame.KEYDOWN:
+            if event.type == pygame.KEYDOWN: # 按键按下事件
                 if event.key == pygame.K_LEFT:
                     a[0] = -1.0
                 if event.key == pygame.K_RIGHT:
@@ -948,13 +960,14 @@ if __name__ == "__main__":
                 if event.key == pygame.K_UP:
                     a[1] = +1.0
                 if event.key == pygame.K_DOWN:
-                    a[2] = +0.8  # 设置较低的刹车值，使车轮减转速
+                    # a[2] = +0.8  # 设置较低的刹车值，使车轮减转速
+                    a[1] = -0.8  # 油门刹车合并成1个值
                 if event.key == pygame.K_RETURN:
                     restart = True
                 if event.key == pygame.K_ESCAPE:
                     quit = True
 
-            if event.type == pygame.KEYUP:
+            if event.type == pygame.KEYUP: # 按键释放事件
                 # 松开按键后将对应动作归零
                 if event.key == pygame.K_LEFT:
                     a[0] = 0
@@ -963,7 +976,8 @@ if __name__ == "__main__":
                 if event.key == pygame.K_UP:
                     a[1] = 0
                 if event.key == pygame.K_DOWN:
-                    a[2] = 0
+                    # a[2] = 0
+                    a[1] = 0 # 油门刹车合并成1个值
 
             if event.type == pygame.QUIT:
                 quit = True
