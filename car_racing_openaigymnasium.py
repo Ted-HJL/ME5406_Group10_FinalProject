@@ -7,6 +7,8 @@ from gymnasium import spaces  # 导入动作和观察空间的定义
 from gymnasium.envs.box2d.car_dynamics import Car  # 导入汽车动力学模型
 from gymnasium.error import DependencyNotInstalled, InvalidAction  # 导入错误处理类
 from gymnasium.utils import EzPickle  # 导入便捷的序列化工具
+import matplotlib.pyplot as plt
+import imageio
 
 # 尝试导入Box2D相关库，如果导入失败则抛出依赖未安装异常
 try:
@@ -29,23 +31,23 @@ except ImportError as e:
     ) from e
 
 
-STATE_W = 96 # 状态图像的宽。less than Atari 160x192
-STATE_H = 96 # 状态图像的高
+STATE_W = 256 # 状态图像的宽。less than Atari 160x192
+STATE_H = 256 
 VIDEO_W = 600 # 视频输出宽度
 VIDEO_H = 400
-WINDOW_W = 1000 # 渲染窗口宽度
-WINDOW_H = 800
+WINDOW_W = 256#1000 # 渲染窗口宽度
+WINDOW_H = 256#800
 
 SCALE = 6.0  # Track scale。赛道缩放比例
-TRACK_RAD = 954 / SCALE  # 圆形赛道基础半径。好像是先生成圆，再使其变形产生弯角。
+TRACK_RAD = 888 / SCALE  # 圆形赛道基础半径。好像是先生成圆，再使其变形产生弯角。半径就是888/6米。
 PLAYFIELD = 2000 / SCALE  # Game over boundary。总图范围。
 FPS = 50  # Frames per second
-ZOOM = 0.27  # Camera zoom。相机放大比例
+ZOOM = 1.6  # Camera zoom。相机放大比例
 ZOOM_FOLLOW = True  # Set to False for fixed view (no zoom)
 
-TRACK_DETAIL_STEP = 21 / SCALE  # 赛道分段步长。值越大，如40，长弯多
+TRACK_DETAIL_STEP = 20 / SCALE  # 赛道分段步长。值越大，如40，长弯多
 TRACK_TURN_RATE = 0.3  # 赛道转弯率，控制赛道弯曲程度。越小倾向长弯，高速弯；越大倾向锐利弯，短弯。
-TRACK_WIDTH = 40 / SCALE # 赛道宽度
+TRACK_WIDTH = 32 / SCALE # 赛道宽度
 BORDER = 8 / SCALE # 赛道边界（路肩）宽度
 BORDER_MIN_COUNT = 4 # 最少的边界块数量，用于判断赛道边界的生成
 GRASS_DIM = PLAYFIELD / 20.0 # 草地块尺寸
@@ -95,7 +97,7 @@ class FrictionDetector(contactListener):
             obj.tiles.add(tile)  # 将当前赛道块加入车辆已访问的集合中
             if not tile.road_visited: # 首次访问该赛道块
                 tile.road_visited = True  # 标记为已访问
-                self.env.reward += 1000.0 / len(self.env.track) # 计算奖励。根据赛道总块数给予奖励，奖励值为1000除以赛道块总数
+                self.env.reward += 1000.0 / len(self.env.track) # 计算reward。根据赛道总块数给予奖励，奖励值为1000除以赛道块总数
                 self.env.tile_visited_count += 1 # 更新已访问的块计数
 
                 # Lap is considered completed if enough % of the track was covered。检查是否完成一圈
@@ -276,8 +278,12 @@ class CarRacing(gym.Env, EzPickle):
         self.observation_space = spaces.Box(
             low=0, high=255, shape=(STATE_H, STATE_W, 3), dtype=np.uint8
         )
-
         self.render_mode = render_mode # 保存渲染模式
+
+        # 偏离赛道检测相关变量
+        self.off_road_steps = 0      # 目前连续“离开赛道”的帧数
+        self.off_road_threshold = 10 # 连续 N 帧未踩到赛道就算偏离
+        self.off_road_penalty = -0.2 # 一旦判定偏离，就扣这么多分
 
     # 内部方法，用于清理和销毁环境中创建的物理对象
     def _destroy(self):
@@ -302,9 +308,9 @@ class CarRacing(gym.Env, EzPickle):
             self.grass_color[idx] += 20
         else:
             # default colours
-            self.road_color = np.array([102, 102, 102])
-            self.bg_color = np.array([102, 204, 102])
-            self.grass_color = np.array([102, 230, 102])
+            self.road_color = np.array([0, 0, 0])#赛道颜色，原来是[102, 102, 102]
+            self.bg_color = np.array([255, 255, 255])#草地颜色，原来是[102, 204, 102]
+            self.grass_color = np.array([255, 255, 255])#草地颜色，原来是[102, 230, 102]
 
     # 重新初始化颜色，当环境重置时可以通过选项指定是否随机化颜色
     def _reinit_colors(self, randomize):
@@ -325,14 +331,14 @@ class CarRacing(gym.Env, EzPickle):
 
     def _create_track(self):
         # 设置检查点的数量，用于构造赛道骨架
-        CHECKPOINTS = 24  # 检查点数量
+        CHECKPOINTS = 12  # 检查点数量
 
         # -----------------------
         # 生成检查点，每个检查点由一个角度alpha和一个半径rad确定
         checkpoints = []
         for c in range(CHECKPOINTS):
             # 为每个检查点添加随机噪声，扰动角度，增加赛道的随机性
-            noise = self.np_random.uniform(0, 2 * math.pi * 1 / CHECKPOINTS)  # 随机噪声
+            noise = self.np_random.uniform(0, 2 * math.pi * 1 / CHECKPOINTS)  # 随机噪声            
             # 均匀分布的角度，叠加噪声
             alpha = 2 * math.pi * c / CHECKPOINTS + noise
             # 随机选择半径，保证检查点不都在固定圆周上，值介于TRACK_RAD/3和TRACK_RAD之间。TRACK_RAD/0.1会导致弯角之间的直道很长。
@@ -561,8 +567,12 @@ class CarRacing(gym.Env, EzPickle):
             #             (255, 255, 255) if i % 2 == 0 else (255, 0, 0),
             #         )
             #     )
+        
         # 保存最终生成的轨迹数据供后续使用（如车辆初始位置等）
         self.track = track
+        # 打印轨迹点数量
+        print(f"Generated track length: {len(track)} segments")  
+
         return True  # 返回True表示赛道生成成功
 
     def reset(
@@ -609,6 +619,9 @@ class CarRacing(gym.Env, EzPickle):
                 )
         # 创建车辆对象，初始位置根据生成的轨迹第一段设置（取track[0]中保存的位置和角度）
         self.car = Car(self.world, *self.track[0][1:4])
+        
+        # 添加 tiles 属性用于偏离赛道检测
+        self.car.tiles = set()
 
         # 如果渲染模式为"human"，则调用render方法
         if self.render_mode == "human":
@@ -662,7 +675,7 @@ class CarRacing(gym.Env, EzPickle):
         truncated = False   # 是否截断（如时间限制）
         info = {}
         if action is not None:  # First step without action, called from reset()
-            # 计算奖励
+            # 计算reward
             self.reward -= 0.1  # 每步小惩罚
             # We actually don't want to count fuel spent, we want car to be faster.
             # self.reward -=  10 * self.car.fuel_spent / ENGINE_POWER
@@ -680,6 +693,28 @@ class CarRacing(gym.Env, EzPickle):
                 terminated = True
                 info["lap_finished"] = False
                 step_reward = -100
+
+        # ===== 新增偏离赛道检测 =====
+        if len(self.car.tiles) == 0:
+            # 这一帧没有与任何 road tile 接触
+            self.off_road_steps += 1
+        else:
+            # 只要重新“踩”到路面，就重置计数
+            self.off_road_steps = 0
+
+        # —— 偏离赛检测逻辑 —— 
+        speed = np.linalg.norm(self.car.hull.linearVelocity)
+        if speed > 0.01: # 静止时不判断偏离赛道
+            if len(self.car.tiles) == 0:
+                self.off_road_steps += 1
+            else:
+                self.off_road_steps = 0
+        else:
+            self.off_road_steps = 0
+
+        if self.off_road_steps >= self.off_road_threshold:
+            step_reward += self.off_road_penalty
+            self.off_road_steps = 0
 
         # 如果渲染模式为human，则调用render进行界面更新
         if self.render_mode == "human":
@@ -731,14 +766,16 @@ class CarRacing(gym.Env, EzPickle):
         # 计算变换参数（缩放、平移、旋转），以便从物理坐标转换到屏幕像素坐标
         angle = -self.car.hull.angle  # 车辆角度取反（因为渲染时坐标系转换）
         # 渐变式缩放：刚开始时较小，随着时间t增加，逐渐达到预设的ZOOM比例
-        zoom = 0.1 * SCALE * max(1 - self.t, 0) + ZOOM * SCALE * min(self.t, 1)
+        # zoom = 0.1 * SCALE * max(1 - self.t, 0) + ZOOM * SCALE * min(self.t, 1)
+        zoom = ZOOM * SCALE # 不要渐变缩放：
         # 平移量：将车辆位置平移到屏幕中心附近（根据缩放比例计算）
         scroll_x = -(self.car.hull.position[0]) * zoom
         scroll_y = -(self.car.hull.position[1]) * zoom
         # 利用pygame的Vector2进行旋转变换，考虑车辆旋转角度
         trans = pygame.math.Vector2((scroll_x, scroll_y)).rotate_rad(angle)
         # 将变换后的结果调整到屏幕坐标（屏幕中心、上偏一点）
-        trans = (WINDOW_W / 2 + trans[0], WINDOW_H / 4 + trans[1])
+        # trans = (WINDOW_W / 2 + trans[0], WINDOW_H / 4 + trans[1])
+        trans = (WINDOW_W / 2 + trans[0], WINDOW_H / 4 + trans[1]) #平移渲染窗口的视角
 
         # 绘制赛道（包括背景、草地和道路），传入当前缩放、平移和旋转角度
         self._render_road(zoom, trans, angle)
@@ -755,14 +792,14 @@ class CarRacing(gym.Env, EzPickle):
         self.surf = pygame.transform.flip(self.surf, False, True)
 
         # 在屏幕上绘制状态指标（例如速度、ABS传感器、转向角、陀螺仪等）
-        self._render_indicators(WINDOW_W, WINDOW_H)
+        # self._render_indicators(WINDOW_W, WINDOW_H) #渲染窗口不显示底部信息，注释掉
 
-        # 绘制奖励数值（在屏幕的固定位置显示累计奖励）
+        # 绘制奖励数值（最左边显示累计奖励）
         font = pygame.font.Font(pygame.font.get_default_font(), 42)
         text = font.render("%04i" % self.reward, True, (255, 255, 255), (0, 0, 0))
         text_rect = text.get_rect()
         text_rect.center = (60, WINDOW_H - WINDOW_H * 2.5 / 40.0)
-        self.surf.blit(text, text_rect)
+        # self.surf.blit(text, text_rect) #渲染窗口不显示奖励值，注释掉
 
         # -----------------------------
         # 根据不同的mode做不同处理：
@@ -784,6 +821,22 @@ class CarRacing(gym.Env, EzPickle):
             # 其他模式则返回是否仍在打开状态
             return self.isopen
         
+        # 截取中央256*256区域
+        # 获取当前512×512的渲染表面
+        surf = pygame.display.get_surface()        
+        # 计算中央256×256区域的坐标（从(128,128)开始截取）
+        center_x, center_y = WINDOW_W//2 - 128, WINDOW_H//2 - 128
+        cropped_surf = surf.subsurface((center_x, center_y, 256, 256))
+        # 返回截取后的图像（或直接显示）
+        # if mode == 'human':
+        #     pygame.init()  # 确保Pygame已初始化
+        #     screen = pygame.display.set_mode((256, 256))  # 创建新窗口
+        #     screen.blit(cropped_surf, (0, 0))  # 绘制裁剪后的图像
+        #     pygame.display.flip()  # 更新显示
+        # if mode == 'rgb_array': #此时返回numpy数组
+        #     return pygame.surfarray.array3d(cropped_surf)
+        return cropped_surf
+
     # 该函数负责绘制背景、草地区域和赛道瓷砖。
     def _render_road(self, zoom, translation, angle): 
         bounds = PLAYFIELD
@@ -827,7 +880,47 @@ class CarRacing(gym.Env, EzPickle):
             color = [int(c) for c in color]
             self._draw_colored_polygon(self.surf, poly, color, zoom, translation, angle)
 
-    # 该函数绘制屏幕底部信息
+        # 绘制顺逆方向标志，箭头/花纹
+        for i, (poly, color) in enumerate(self.road_poly):
+            if i % 3 == 0:  # 每3个赛道块显示一个箭头
+                poly = [(p[0], p[1]) for p in poly]
+                color = [int(c) for c in color]
+                self._draw_colored_polygon(self.surf, poly, color, zoom, translation, angle)
+
+                # 计算赛道块中心点
+                center_x = sum(p[0] for p in poly) / len(poly)
+                center_y = sum(p[1] for p in poly) / len(poly)
+
+                # 获取当前赛道块的切向方向（beta角度）
+                # 注意：这里假设self.track存储了每个赛道段的beta角度
+                if hasattr(self, 'track') and i < len(self.track):
+                    _, beta, _, _ = self.track[i]
+                else:
+                    beta = 0  # 默认方向
+
+                # 绘制箭头（指向切向方向）
+                arrow_size = 1  # 箭头大小
+                # 箭头的初始方向是向上（0度），需要根据beta旋转
+                arrow_points = [
+                    (0, arrow_size),  # 顶点
+                    (arrow_size, -arrow_size),  # 左下
+                    (-arrow_size, -arrow_size),  # 右下
+                ]
+                # 旋转箭头
+                rotated_arrow = []
+                for (x, y) in arrow_points:
+                    # 旋转beta角度
+                    rx = x * math.cos(beta) - y * math.sin(beta)
+                    ry = x * math.sin(beta) + y * math.cos(beta)
+                    # 平移到中心点
+                    rotated_arrow.append((center_x + rx, center_y + ry))
+                
+                arrow_color = (127, 127, 127)  # 灰色箭头
+                self._draw_colored_polygon(
+                    self.surf, rotated_arrow, arrow_color, zoom, translation, angle
+                )
+
+    # 该函数绘制屏幕底部信息,从左到右分别是：数字，累积奖励；白色，车速；4个蓝色块，4个轮子的角速度；绿色，方向盘的转向角度；红色，车身的横摆角变化率
     def _render_indicators(self, W, H):
         s = W / 40.0  # 指示器宽度单位
         h = H / 40.0  # 指示器高度单位
@@ -961,7 +1054,7 @@ if __name__ == "__main__":
                     a[1] = +1.0
                 if event.key == pygame.K_DOWN:
                     # a[2] = +0.8  # 设置较低的刹车值，使车轮减转速
-                    a[1] = -0.8  # 油门刹车合并成1个值
+                    a[1] = -0.2  # 油门刹车合并成1个值
                 if event.key == pygame.K_RETURN:
                     restart = True
                 if event.key == pygame.K_ESCAPE:
@@ -982,7 +1075,7 @@ if __name__ == "__main__":
             if event.type == pygame.QUIT:
                 quit = True
 
-    # 创建CarRacing环境，并设置渲染模式为human
+    # 创建CarRacing环境，并设置渲染模式为 human/rgb_array/state_pixels
     env = CarRacing(render_mode="human")
 
     quit = False
@@ -992,13 +1085,26 @@ if __name__ == "__main__":
         steps = 0
         restart = False
         while True:
-            register_input()  # 读取用户输入，更新控制动作a
+            # 只有human模式下才去处理键盘输入,state_pixels模式不需要键盘输入。没有这行会报错。
+            if env.render_mode == "human":
+               register_input()
             # 执行动作，获取下一个状态、奖励、是否终止等信息
             s, r, terminated, truncated, info = env.step(a)
+            # # 用Matplotlib显示96*96observation
+            # plt.imshow(s)
+            # plt.axis('off')
+            # plt.show()
+            # # 用imageio将当前帧保存成文件
+            # imageio.imwrite('/home/user/Desktop/frame.png', s)
+            # 查看 observation s 的类型和维度
+            print(f"s 类型: {type(s)}, dtype: {s.dtype}, shape: {s.shape}")
+            # （可选）查看维度数量
+            print(f"s 维度数 ndim: {s.ndim}")
             total_reward += r
-            if steps % 200 == 0 or terminated or truncated:
+            if steps % 50 == 0 or terminated or truncated: # 每50帧，即1秒
                 print("\naction " + str([f"{x:+0.2f}" for x in a]))
                 print(f"step {steps} total_reward {total_reward:+0.2f}")
+                # print(f"step {steps} env.reward {env.reward:+0.2f}")                
             steps += 1
             # 如果回合结束、重启或者退出，则跳出当前循环
             if terminated or truncated or restart or quit:
