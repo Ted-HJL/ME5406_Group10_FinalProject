@@ -31,8 +31,8 @@ except ImportError as e:
     ) from e
 
 
-STATE_W = 256 # 状态图像的宽。less than Atari 160x192
-STATE_H = 256 
+STATE_W = 128 # 状态图像的宽。less than Atari 160x192
+STATE_H = 128 
 VIDEO_W = 600 # 视频输出宽度
 VIDEO_H = 400
 WINDOW_W = 256#1000 # 渲染窗口宽度
@@ -704,6 +704,7 @@ class CarRacing(gym.Env, EzPickle):
 
         # —— 偏离赛检测逻辑 —— 
         speed = np.linalg.norm(self.car.hull.linearVelocity)
+        info["speed"] = speed #speed本身时局部变量，这样能实现输出全局变量
         if speed > 0.01: # 静止时不判断偏离赛道
             if len(self.car.tiles) == 0:
                 self.off_road_steps += 1
@@ -775,7 +776,7 @@ class CarRacing(gym.Env, EzPickle):
         trans = pygame.math.Vector2((scroll_x, scroll_y)).rotate_rad(angle)
         # 将变换后的结果调整到屏幕坐标（屏幕中心、上偏一点）
         # trans = (WINDOW_W / 2 + trans[0], WINDOW_H / 4 + trans[1])
-        trans = (WINDOW_W / 2 + trans[0], WINDOW_H / 4 + trans[1]) #平移渲染窗口的视角
+        trans = (WINDOW_W / 2 + trans[0], WINDOW_H / 4 + trans[1]-90) #平移渲染窗口的视角
 
         # 绘制赛道（包括背景、草地和道路），传入当前缩放、平移和旋转角度
         self._render_road(zoom, trans, angle)
@@ -1089,18 +1090,18 @@ if __name__ == "__main__":
             if env.render_mode == "human":
                register_input()
             # 执行动作，获取下一个状态、奖励、是否终止等信息
-            s, r, terminated, truncated, info = env.step(a)
+            img, reward, terminated, truncated, info = env.step(a)
             # # 用Matplotlib显示96*96observation
-            # plt.imshow(s)
+            # plt.imshow(img)
             # plt.axis('off')
             # plt.show()
             # # 用imageio将当前帧保存成文件
-            # imageio.imwrite('/home/user/Desktop/frame.png', s)
-            # 查看 observation s 的类型和维度
-            print(f"s 类型: {type(s)}, dtype: {s.dtype}, shape: {s.shape}")
+            # imageio.imwrite('/home/user/Desktop/frame.png', img)
+            # 查看 observation img 的类型和维度
+            print(f"img 类型: {type(img)}, dtype: {img.dtype}, shape: {img.shape}")
             # （可选）查看维度数量
-            print(f"s 维度数 ndim: {s.ndim}")
-            total_reward += r
+            print(f"img 维度数 ndim: {img.ndim}")
+            total_reward += reward
             if steps % 50 == 0 or terminated or truncated: # 每50帧，即1秒
                 print("\naction " + str([f"{x:+0.2f}" for x in a]))
                 print(f"step {steps} total_reward {total_reward:+0.2f}")
