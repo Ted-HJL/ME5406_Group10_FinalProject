@@ -1,4 +1,4 @@
-__credits__ = ["Andrea PIERRÉ"]  # 作者信息
+#__credits__ = ["Andrea PIERRÉ"]  # 作者信息
 import math  # 数学函数模块
 from typing import Optional, Union  # 用于类型注解
 import numpy as np  # 数组与数值计算库
@@ -35,8 +35,8 @@ STATE_W = 128 # 状态图像的宽。less than Atari 160x192
 STATE_H = 128 
 VIDEO_W = 600 # 视频输出宽度
 VIDEO_H = 400
-WINDOW_W = 256#1000 # 渲染窗口宽度
-WINDOW_H = 256#800
+WINDOW_W = 1000 # 渲染窗口宽度256#
+WINDOW_H = 800#256
 
 SCALE = 6.0  # Track scale。赛道缩放比例
 TRACK_RAD = 888 / SCALE  # 圆形赛道基础半径。好像是先生成圆，再使其变形产生弯角。半径就是888/6米。
@@ -95,6 +95,7 @@ class FrictionDetector(contactListener):
             return
         if begin:  # 开始接触
             obj.tiles.add(tile)  # 将当前赛道块加入车辆已访问的集合中
+            self.env.last_tile_idx = tile.idx #用于逆行检测，记录最后一次踩到的 tile
             if not tile.road_visited: # 首次访问该赛道块
                 tile.road_visited = True  # 标记为已访问
                 self.env.reward += 1000.0 / len(self.env.track) # 计算reward。根据赛道总块数给予奖励，奖励值为1000除以赛道块总数
@@ -274,7 +275,7 @@ class CarRacing(gym.Env, EzPickle):
         else:
             self.action_space = spaces.Discrete(5) # 离散动作: 无操作/左转/右转/油门/刹车
 
-        # 初始化观察空间(96x96 RGB图像)
+        # 初始化观察空间(128x128 RGB图像)
         self.observation_space = spaces.Box(
             low=0, high=255, shape=(STATE_H, STATE_W, 3), dtype=np.uint8
         )
@@ -284,6 +285,11 @@ class CarRacing(gym.Env, EzPickle):
         self.off_road_steps = 0      # 目前连续“离开赛道”的帧数
         self.off_road_threshold = 10 # 连续 N 帧未踩到赛道就算偏离
         self.off_road_penalty = -0.2 # 一旦判定偏离，就扣这么多分
+        # 逆行检测相关变量
+        self.wrong_dir_steps      = 0      # 连续逆行帧数
+        self.wrong_dir_threshold  = 1     # 超过多少帧算逆行
+        self.wrong_dir_penalty    = -0.2   # 逆行一次扣分
+        self.last_tile_idx = None # 逆行检测：记录最后一次接触到的 tile idx
 
     # 内部方法，用于清理和销毁环境中创建的物理对象
     def _destroy(self):
@@ -532,8 +538,9 @@ class CarRacing(gym.Env, EzPickle):
             t = self.world.CreateStaticBody(fixtures=self.fd_tile)
             t.userData = t  # 将自身设置为用户数据，便于后续碰撞检测中识别
             # 根据索引为瓷砖附加轻微色彩偏移，增加视觉变化
-            c = 0.01 * (i % 3) * 255
-            t.color = self.road_color + c
+            c = 0.01 * (i % 3) * 255 
+            # t.color = self.road_color + c
+            t.color = self.road_color # 不要色彩偏移
             t.road_visited = False  # 标记该块是否被访问过
             t.road_friction = 1.0  # 设置摩擦系数
             t.idx = i  # 记录该瓷砖的索引
@@ -597,6 +604,7 @@ class CarRacing(gym.Env, EzPickle):
         self.t = 0.0  # 重置时间计数器
         self.new_lap = False  # 标记新一圈未开始
         self.road_poly = []  # 清空赛道多边形数据
+        self.last_tile_idx = None #用于逆行检测
 
         # 如果启用了颜色随机化，则根据options参数决定是否重新随机化颜色
         if self.domain_randomize:
@@ -701,8 +709,7 @@ class CarRacing(gym.Env, EzPickle):
         else:
             # 只要重新“踩”到路面，就重置计数
             self.off_road_steps = 0
-
-        # —— 偏离赛检测逻辑 —— 
+        # 偏离赛检测逻辑 
         speed = np.linalg.norm(self.car.hull.linearVelocity)
         info["speed"] = speed #speed本身时局部变量，这样能实现输出全局变量
         if speed > 0.01: # 静止时不判断偏离赛道
@@ -715,7 +722,40 @@ class CarRacing(gym.Env, EzPickle):
 
         if self.off_road_steps >= self.off_road_threshold:
             step_reward += self.off_road_penalty
+            # #GPT说让self.reward也接受偏离赛道惩罚：
+            self.reward += self.off_road_penalty
             self.off_road_steps = 0
+
+        # ===== 新增：逆行（与赛道方向相反）检测 =====
+        # 先选一个 tile idx：优先用当前接触的 tile，没有则回退到 last_tile_idx
+        if len(self.car.tiles) > 0:
+            tile = next(iter(self.car.tiles))
+            idx = tile.idx
+        else:
+            idx = self.last_tile_idx
+
+        if idx is not None:
+            # 赛道切向
+            beta      = self.track[idx][1]
+            track_vec = np.array([math.cos(beta), math.sin(beta)])
+            # 速度向量
+            vx, vy    = self.car.hull.linearVelocity
+            vel_vec   = np.array([vx, vy])
+            # dot<0 才算真在倒退
+            if vel_vec.dot(track_vec) < 0:
+                self.wrong_dir_steps += 1
+            else:
+                self.wrong_dir_steps = 0
+        else:
+            # 既没接触，也没 last_tile，就跳过逆行检测
+            self.wrong_dir_steps = 0
+
+        # 触发惩罚
+        if self.wrong_dir_steps >= self.wrong_dir_threshold:
+            step_reward        += self.wrong_dir_penalty
+            #GPT说让self.reward也接受逆行惩罚吗：
+            self.reward        += self.wrong_dir_penalty
+            self.wrong_dir_steps = 0
 
         # 如果渲染模式为human，则调用render进行界面更新
         if self.render_mode == "human":
@@ -775,8 +815,8 @@ class CarRacing(gym.Env, EzPickle):
         # 利用pygame的Vector2进行旋转变换，考虑车辆旋转角度
         trans = pygame.math.Vector2((scroll_x, scroll_y)).rotate_rad(angle)
         # 将变换后的结果调整到屏幕坐标（屏幕中心、上偏一点）
-        # trans = (WINDOW_W / 2 + trans[0], WINDOW_H / 4 + trans[1])
-        trans = (WINDOW_W / 2 + trans[0], WINDOW_H / 4 + trans[1]-90) #平移渲染窗口的视角
+        trans = (WINDOW_W / 2 + trans[0], WINDOW_H / 4 + trans[1])
+        # trans = (WINDOW_W / 2 + trans[0], WINDOW_H / 4 + trans[1]-90) #平移渲染窗口的视角
 
         # 绘制赛道（包括背景、草地和道路），传入当前缩放、平移和旋转角度
         self._render_road(zoom, trans, angle)
@@ -795,12 +835,12 @@ class CarRacing(gym.Env, EzPickle):
         # 在屏幕上绘制状态指标（例如速度、ABS传感器、转向角、陀螺仪等）
         # self._render_indicators(WINDOW_W, WINDOW_H) #渲染窗口不显示底部信息，注释掉
 
-        # 绘制奖励数值（最左边显示累计奖励）
+        # 绘制奖励数值（左下角显示累计奖励）。原来是self.reward
         font = pygame.font.Font(pygame.font.get_default_font(), 42)
         text = font.render("%04i" % self.reward, True, (255, 255, 255), (0, 0, 0))
         text_rect = text.get_rect()
         text_rect.center = (60, WINDOW_H - WINDOW_H * 2.5 / 40.0)
-        # self.surf.blit(text, text_rect) #渲染窗口不显示奖励值，注释掉
+        self.surf.blit(text, text_rect) #渲染窗口不显示奖励值，注释掉
 
         # -----------------------------
         # 根据不同的mode做不同处理：
@@ -822,7 +862,7 @@ class CarRacing(gym.Env, EzPickle):
             # 其他模式则返回是否仍在打开状态
             return self.isopen
         
-        # 截取中央256*256区域
+        # 截取中央256*256区域，没用上
         # 获取当前512×512的渲染表面
         surf = pygame.display.get_surface()        
         # 计算中央256×256区域的坐标（从(128,128)开始截取）
@@ -1089,23 +1129,27 @@ if __name__ == "__main__":
             # 只有human模式下才去处理键盘输入,state_pixels模式不需要键盘输入。没有这行会报错。
             if env.render_mode == "human":
                register_input()
-            # 执行动作，获取下一个状态、奖励、是否终止等信息
+            # 执行动作，获取下一个状态、奖励、是否终止等信息。之前img叫s,reward叫r
             img, reward, terminated, truncated, info = env.step(a)
-            # # 用Matplotlib显示96*96observation
+            # # 用Matplotlib显示96*96observation:
             # plt.imshow(img)
             # plt.axis('off')
             # plt.show()
-            # # 用imageio将当前帧保存成文件
+            # # 用imageio将当前帧保存成文件:
             # imageio.imwrite('/home/user/Desktop/frame.png', img)
-            # 查看 observation img 的类型和维度
-            print(f"img 类型: {type(img)}, dtype: {img.dtype}, shape: {img.shape}")
-            # （可选）查看维度数量
-            print(f"img 维度数 ndim: {img.ndim}")
+            # 查看 observation img 的类型和维度：
+            # print(f"img 类型: {type(img)}, dtype: {img.dtype}, shape: {img.shape}")
+            # # （可选）查看维度数量:
+            # print(f"img 维度数 ndim: {img.ndim}")
             total_reward += reward
             if steps % 50 == 0 or terminated or truncated: # 每50帧，即1秒
                 print("\naction " + str([f"{x:+0.2f}" for x in a]))
-                print(f"step {steps} total_reward {total_reward:+0.2f}")
-                # print(f"step {steps} env.reward {env.reward:+0.2f}")                
+                # 如果你想看“第 N 步单独这一帧拿到多少分”，看脚本拿到的 reward（或打印 step_reward）。
+                # 如果想看“到第 N 步为止，总共拿了多少分”，用脚本里的 total_reward。
+                # env.reward 则直接输出环境内部的 self.reward，理论上它和 total_reward 会保持一致，但前者是内部状态，后者是外部累加。
+                # print(f"step {steps} total_reward {total_reward:+0.2f}")
+                print(f"step {steps} env.reward {env.reward:+0.2f}") #打印的env.reward是环境内部的self.reward ——ChatGPT
+                print(f"step {steps} reward {reward:+0.2f}") #是每step的reward
             steps += 1
             # 如果回合结束、重启或者退出，则跳出当前循环
             if terminated or truncated or restart or quit:
