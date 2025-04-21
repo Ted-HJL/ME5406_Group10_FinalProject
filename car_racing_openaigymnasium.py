@@ -722,8 +722,7 @@ class CarRacing(gym.Env, EzPickle):
 
         if self.off_road_steps >= self.off_road_threshold:
             step_reward += self.off_road_penalty
-            # #GPT说让self.reward也接受偏离赛道惩罚：
-            self.reward += self.off_road_penalty
+            self.reward += self.off_road_penalty#GPT说让self.reward也接受偏离赛道惩罚：
             self.off_road_steps = 0
 
         # ===== 新增：逆行（与赛道方向相反）检测 =====
@@ -752,10 +751,10 @@ class CarRacing(gym.Env, EzPickle):
 
         # 触发惩罚
         if self.wrong_dir_steps >= self.wrong_dir_threshold:
-            step_reward        += self.wrong_dir_penalty
-            #GPT说让self.reward也接受逆行惩罚吗：
-            self.reward        += self.wrong_dir_penalty
+            step_reward += self.wrong_dir_penalty
+            self.reward += self.wrong_dir_penalty#GPT说让self.reward也接受逆行惩罚吗：
             self.wrong_dir_steps = 0
+        # ===== 逆行检测结束 =====
 
         # 如果渲染模式为human，则调用render进行界面更新
         if self.render_mode == "human":
@@ -808,7 +807,7 @@ class CarRacing(gym.Env, EzPickle):
         angle = -self.car.hull.angle  # 车辆角度取反（因为渲染时坐标系转换）
         # 渐变式缩放：刚开始时较小，随着时间t增加，逐渐达到预设的ZOOM比例
         # zoom = 0.1 * SCALE * max(1 - self.t, 0) + ZOOM * SCALE * min(self.t, 1)
-        zoom = ZOOM * SCALE # 不要渐变缩放：
+        zoom = ZOOM * SCALE #不要渐变缩放
         # 平移量：将车辆位置平移到屏幕中心附近（根据缩放比例计算）
         scroll_x = -(self.car.hull.position[0]) * zoom
         scroll_y = -(self.car.hull.position[1]) * zoom
@@ -862,7 +861,7 @@ class CarRacing(gym.Env, EzPickle):
             # 其他模式则返回是否仍在打开状态
             return self.isopen
         
-        # 截取中央256*256区域，没用上
+        # 截取中央256*256区域。（没用上）
         # 获取当前512×512的渲染表面
         surf = pygame.display.get_surface()        
         # 计算中央256×256区域的坐标（从(128,128)开始截取）
